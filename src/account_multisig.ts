@@ -180,7 +180,11 @@ export class Account2FA extends AccountMultisig {
         if ((await this.state()).code_hash === '11111111111111111111111111111111') {
             actions.push(functionCall('new', newArgs, MULTISIG_GAS, MULTISIG_DEPOSIT),);
         }
-        console.log('deploying multisig contract for', accountId);
+
+        if (this.connection.debug) {
+            console.log('deploying multisig contract for', accountId);
+        }
+
         return await super.signAndSendTransactionWithAccount(accountId, actions);
     }
 
@@ -202,7 +206,10 @@ export class Account2FA extends AccountMultisig {
             ...lak2fak.map(({ public_key }) => addKey(public_key, null)),
             deployContract(contractBytes),
         ];
-        console.log('disabling 2fa for', accountId);
+        if (this.connection.debug) {
+            console.log('disabling 2fa for', accountId);
+        }
+        
         return await this.signAndSendTransaction(accountId, actions);
     }
 

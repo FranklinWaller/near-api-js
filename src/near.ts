@@ -20,6 +20,9 @@ export interface NearConfig {
     /** Holds {@link KeyPair | KeyPairs} for signing transactions */
     keyStore?: KeyStore;
 
+    /** Adds debugging logs */
+    debug?: boolean;
+
     /** @hidden */
     signer?: Signer;
 
@@ -79,7 +82,8 @@ export class Near {
         this.connection = Connection.fromConfig({
             networkId: config.networkId,
             provider: { type: 'JsonRpcProvider', args: { url: config.nodeUrl } },
-            signer: config.signer || { type: 'InMemorySigner', keyStore: config.keyStore || config.deps.keyStore }
+            signer: config.signer || { type: 'InMemorySigner', keyStore: config.keyStore || config.deps.keyStore },
+            debug: config.debug ?? true,
         });
         if (config.masterAccount) {
             // TODO: figure out better way of specifiying initial balance.

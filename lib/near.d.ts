@@ -18,6 +18,8 @@ import { KeyStore } from './key_stores';
 export interface NearConfig {
     /** Holds {@link KeyPair | KeyPairs} for signing transactions */
     keyStore?: KeyStore;
+    /** Adds debugging logs */
+    debug?: boolean;
     /** @hidden */
     signer?: Signer;
     /** @deprecated use {@link NearConfig.keyStore} */

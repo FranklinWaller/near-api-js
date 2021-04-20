@@ -36,11 +36,13 @@ export class Connection {
     readonly networkId: string;
     readonly provider: Provider;
     readonly signer: Signer;
+    readonly debug: boolean;
 
-    constructor(networkId: string, provider: Provider, signer: Signer) {
+    constructor(networkId: string, provider: Provider, signer: Signer, debug: boolean) {
         this.networkId = networkId;
         this.provider = provider;
         this.signer = signer;
+        this.debug = debug;
     }
 
     /**
@@ -49,6 +51,6 @@ export class Connection {
     static fromConfig(config: any): Connection {
         const provider = getProvider(config.provider);
         const signer = getSigner(config.signer);
-        return new Connection(config.networkId, provider, signer);
+        return new Connection(config.networkId, provider, signer, config.debug);
     }
 }

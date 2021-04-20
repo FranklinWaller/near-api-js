@@ -25,6 +25,7 @@ import { parseRpcError, parseResultError } from './utils/rpc_errors';
 import { ServerError } from './generated/rpc_error_types';
 
 import exponentialBackoff from './utils/exponential-backoff';
+import { NearConfig } from './near';
 
 // Default amount of gas to be sent with the function calls. Used to pay for the fees
 // incurred while running the contract execution. The unused amount will be refunded back to
@@ -188,7 +189,10 @@ export class Account {
                 });
             } else return acc;
         }, []);
-        this.printLogsAndFailures(signedTx.transaction.receiverId, flatLogs);
+
+        if (this.connection.debug) {
+            this.printLogsAndFailures(signedTx.transaction.receiverId, flatLogs);
+        }
 
         if (typeof result.status === 'object' && typeof result.status.Failure === 'object') {
             // if error data has error_message and error_type properties, we consider that node returned an error in the old format
@@ -384,7 +388,7 @@ export class Account {
             finality: 'optimistic'
         });
 
-        if (result.logs) {
+        if (result.logs && this.connection.debug) {
             this.printLogs(contractId, result.logs);
         }
 
