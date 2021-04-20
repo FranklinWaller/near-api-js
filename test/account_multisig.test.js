@@ -27,7 +27,7 @@ const getAccount2FA = async (account, keyMapping = ({ public_key: publicKey }) =
         getCode: () => {},
         sendCode: () => {},
         // auto accept "code"
-        verifyCode: () => ({ success: true, res: '' }),
+        verifyCode: () => ({  }), // TODO: Is there any content needed in result?
         onAddRequestResult: async () => {
             const { requestId } = account2fa.getRequest();
             // set confirmKey as signer
@@ -113,7 +113,6 @@ describe('account2fa transactions', () => {
         receiver = await getAccount2FA(receiver);
         const { amount: receiverAmount } = await receiver.state();
         await sender.sendMoney(receiver.accountId, new BN(parseNearAmount('1')));
-        await receiver.fetchState();
         const state = await receiver.state();
         expect(BigInt(state.amount)).toBeGreaterThanOrEqual(BigInt(new BN(receiverAmount).add(new BN(parseNearAmount('0.9'))).toString()));
     });

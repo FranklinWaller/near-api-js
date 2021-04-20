@@ -1,8 +1,6 @@
 const url = require('url');
 const localStorage = require('localstorage-memory');
 const BN = require('bn.js');
-const nearApi = require('../lib/index');
-const borsh = require('borsh');
 
 // If an access key has itself as receiverId and method permission add_request_and_confirm, then it is being used in a wallet with multisig contract: https://github.com/near/core-contracts/blob/671c05f09abecabe7a7e58efe942550a35fc3292/multisig/src/lib.rs#L149-L153
 const MULTISIG_HAS_METHOD = 'add_request_and_confirm';
@@ -15,6 +13,7 @@ global.window = {
 global.document = {
     title: 'documentTitle'
 };
+const nearApi = require('../lib/index');
 
 let history;
 let nearFake;
@@ -30,6 +29,11 @@ beforeEach(() => {
         connection: {
             networkId: 'networkId',
             signer: new nearApi.InMemorySigner(keyStore)
+        },
+        account() {
+            return {
+                state() {}
+            };
         }
     };
     lastRedirectUrl = null;
@@ -62,7 +66,6 @@ it('can request sign in', async () => {
         protocol: 'http:',
         host: 'example.com',
         query: {
-            title: 'signInTitle',
             contract_id: 'signInContract',
             success_url: 'http://example.com/success',
             failure_url: 'http://example.com/fail',
@@ -86,7 +89,7 @@ it('can complete sign in', async () => {
 });
 
 const BLOCK_HASH = '244ZQ9cgj3CQ6bWBdytfrJMuMQ1jdXLFGnr4HhvtCTnM';
-const blockHash = borsh.baseDecode(BLOCK_HASH);
+const blockHash = nearApi.utils.serialize.base_decode(BLOCK_HASH);
 function createTransferTx() {
     const actions = [
         nearApi.transactions.transfer(1),
@@ -123,7 +126,7 @@ function parseTransactionsFromUrl(urlToParse) {
         }
     });
     const transactions = parsedUrl.query.transactions.split(',')
-        .map(txBase64 => borsh.deserialize(
+        .map(txBase64 => nearApi.utils.serialize.deserialize(
             nearApi.transactions.SCHEMA,
             nearApi.transactions.Transaction,
             Buffer.from(txBase64, 'base64')));
@@ -136,22 +139,21 @@ function setupWalletConnectionForSigning({ allKeys, accountAccessKeys }) {
         accountId: 'signer.near'
     };
     nearFake.connection.provider = {
-        query(path, data) {
-            if (path === 'account/signer.near') {
+        query(params) {
+            if (params.request_type === 'view_account' && params.account_id === 'signer.near') {
                 return { };
             }
-            if (path === 'access_key/signer.near') {
+            if (params.request_type === 'view_access_key_list' && params.account_id === 'signer.near') {
                 return { keys: accountAccessKeys };
             }
-            if (path.startsWith('access_key/signer.near')) {
-                const [,,publicKey] = path.split('/');
+            if (params.request_type === 'view_access_key' && params.account_id === 'signer.near') {
                 for (let accessKey of accountAccessKeys) {
-                    if (accessKey.public_key === publicKey) {
+                    if (accessKey.public_key === params.public_key) {
                         return accessKey;
                     }
                 }
             }
-            fail(`Unexpected query: ${path} ${data}`);
+            fail(`Unexpected query: ${JSON.stringify(params)}`);
         },
         sendTransaction(signedTransaction) {
             lastTransaction = signedTransaction;
@@ -160,10 +162,10 @@ function setupWalletConnectionForSigning({ allKeys, accountAccessKeys }) {
                 receipts_outcome: []
             };
         },
-        status() {
+        block() {
             return {
-                sync_info: {
-                    latest_block_hash: BLOCK_HASH
+                header: {
+                    hash: BLOCK_HASH
                 }
             };
         }

@@ -1,6 +1,5 @@
-'use strict';
-
 import BN from 'bn.js';
+import depd from 'depd';
 import {
     transfer,
     createAccount,
@@ -13,12 +12,11 @@ import {
     deleteKey,
     stake,
     deleteAccount,
-    AccessKey,
     Action,
     SignedTransaction
 } from './transaction';
 import { FinalExecutionOutcome, TypedError, ErrorContext } from './providers';
-import { Finality, BlockId } from './providers/provider';
+import { Finality, BlockId, ViewStateResult, AccountView, AccessKeyView, CodeResult, AccessKeyList, AccessKeyInfoView, FunctionCallPermissionView } from './providers/provider';
 import { Connection } from './connection';
 import { baseDecode, baseEncode } from 'borsh';
 import { PublicKey } from './utils/key_pair';
@@ -39,27 +37,23 @@ const DEFAULT_FUNC_CALL_GAS = new BN('30000000000000');
 // Default number of retries with different nonce before giving up on a transaction.
 const TX_NONCE_RETRY_NUMBER = 12;
 
-// Default number of retries before giving up on a transaction.
-const TX_STATUS_RETRY_NUMBER = 12;
-
 // Default wait until next retry in millis.
-const TX_STATUS_RETRY_WAIT = 500;
+const TX_NONCE_RETRY_WAIT = 500;
 
 // Exponential back off for waiting to retry.
-const TX_STATUS_RETRY_WAIT_BACKOFF = 1.5;
-
-export interface AccountState {
-    amount: string;
-    code_hash: string;
-    storage_usage: number;
-    locked: string;
-}
+const TX_NONCE_RETRY_WAIT_BACKOFF = 1.5;
 
 export interface AccountBalance {
     total: string;
     stateStaked: string;
     staked: string;
     available: string;
+}
+
+export interface AccountAuthorizedApp {
+    contractId: string;
+    amount: string;
+    publicKey: PublicKey;
 }
 
 interface ReceiptLogWithFailure {
@@ -73,16 +67,21 @@ function parseJsonFromRawResponse (response: Uint8Array): any {
 }
 
 /**
- * More information on [the Account spec](https://nomicon.io/DataStructures/Account.html)
+ * This class provides common account related RPC calls including signing transactions with a {@link KeyPair}.
+ * 
+ * @example {@link https://docs.near.org/docs/develop/front-end/naj-quick-reference#account}
+ * @hint Use {@link WalletConnection} in the browser to redirect to {@link https://docs.near.org/docs/tools/near-wallet | NEAR Wallet} for Account/key management using the {@link BrowserLocalStorageKeyStore}.
+ * @see {@link https://nomicon.io/DataStructures/Account.html | Account Spec}
  */
 export class Account {
     readonly connection: Connection;
     readonly accountId: string;
-    private _state: AccountState;
 
-    private _ready: Promise<void>;
+    /** @hidden */
     protected get ready(): Promise<void> {
-        return this._ready || (this._ready = Promise.resolve(this.fetchState()));
+        const deprecate = depd('Account.ready()');
+        deprecate('not needed anymore, always ready');
+        return Promise.resolve();
     }
 
     constructor(connection: Connection, accountId: string) {
@@ -90,23 +89,24 @@ export class Account {
         this.accountId = accountId;
     }
 
-    /**
-     * Helper function when getting the state of a NEAR account
-     * @returns Promise<void>
-     */
     async fetchState(): Promise<void> {
-        this._state = await this.connection.provider.query(`account/${this.accountId}`, '');
+        const deprecate = depd('Account.fetchState()');
+        deprecate('use `Account.state()` instead');
     }
 
     /**
-     * Returns the state of a NEAR account
-     * @returns {Promise<AccountState>}
+     * Returns basic NEAR account information via the `view_account` RPC query method
+     * @see {@link https://docs.near.org/docs/develop/front-end/rpc#view-account}
      */
-    async state(): Promise<AccountState> {
-        await this.ready;
-        return this._state;
+    async state(): Promise<AccountView> {
+        return this.connection.provider.query<AccountView>({
+            request_type: 'view_account',
+            account_id: this.accountId,
+            finality: 'optimistic'
+        });
     }
 
+    /** @hidden */
     private printLogsAndFailures(contractId: string, results: [ReceiptLogWithFailure]) {
         for (const result of results) {
             console.log(`Receipt${result.receiptIds.length > 1 ? 's' : ''}: ${result.receiptIds.join(', ')}`);
@@ -117,68 +117,53 @@ export class Account {
         }
     }
 
+    /** @hidden */
     private printLogs(contractId: string, logs: string[], prefix = '') {
         for (const log of logs) {
             console.log(`${prefix}Log [${contractId}]: ${log}`);
         }
     }
 
+    /**
+     * Create a signed transaction which can be broadcast to the network
+     * @param receiverId NEAR account receiving the transaction
+     * @param actions list of actions to perform as part of the transaction
+     * @see {@link JsonRpcProvider.sendTransaction}
+     */
     protected async signTransaction(receiverId: string, actions: Action[]): Promise<[Uint8Array, SignedTransaction]> {
-        await this.ready;
-
         const accessKeyInfo = await this.findAccessKey(receiverId, actions);
         if (!accessKeyInfo) {
             throw new TypedError(`Can not sign transactions for account ${this.accountId} on network ${this.connection.networkId}, no matching key pair found in ${this.connection.signer}.`, 'KeyNotFound');
         }
         const { accessKey } = accessKeyInfo;
 
-        const status = await this.connection.provider.status();
+        const block = await this.connection.provider.block({ finality: 'final' });
+        const blockHash = block.header.hash;
 
         const nonce = ++accessKey.nonce;
-        // TODO: get latest_block_hash from block query using `final` finality
         return await signTransaction(
-            receiverId, nonce, actions, baseDecode(status.sync_info.latest_block_hash), this.connection.signer, this.accountId, this.connection.networkId
+            receiverId, nonce, actions, baseDecode(blockHash), this.connection.signer, this.accountId, this.connection.networkId
         );
     }
 
     /**
+     * Sign a transaction to preform a list of actions and broadcast it using the RPC API.
+     * @see {@link JsonRpcProvider.sendTransaction}
+     * 
      * @param receiverId NEAR account receiving the transaction
-     * @param actions The transaction [Action as described in the spec](https://nomicon.io/RuntimeSpec/Actions.html).
-     * @returns {Promise<FinalExecutionOutcome>}
+     * @param actions list of actions to perform as part of the transaction
      */
     protected async signAndSendTransaction(receiverId: string, actions: Action[]): Promise<FinalExecutionOutcome> {
-        await this.ready;
-
         let txHash, signedTx;
         // TODO: TX_NONCE (different constants for different uses of exponentialBackoff?)
-        const result = await exponentialBackoff(TX_STATUS_RETRY_WAIT, TX_NONCE_RETRY_NUMBER, TX_STATUS_RETRY_WAIT_BACKOFF, async () => {
+        const result = await exponentialBackoff(TX_NONCE_RETRY_WAIT, TX_NONCE_RETRY_NUMBER, TX_NONCE_RETRY_WAIT_BACKOFF, async () => {
             [txHash, signedTx] = await this.signTransaction(receiverId, actions);
             const publicKey = signedTx.transaction.publicKey;
 
             try {
-                const result = await exponentialBackoff(TX_STATUS_RETRY_WAIT, TX_STATUS_RETRY_NUMBER, TX_STATUS_RETRY_WAIT_BACKOFF, async () => {
-                    try {
-                        return await this.connection.provider.sendTransaction(signedTx);
-                    } catch (error) {
-                        // TODO: Somehow getting still:
-                        // Error: send_tx_commit has timed out.
-                        if (error.type === 'TimeoutError') {
-                            console.warn(`Retrying transaction ${receiverId}:${baseEncode(txHash)} as it has timed out`);
-                            return null;
-                        }
-
-                        throw error;
-                    }
-                });
-                if (!result) {
-                    throw new TypedError(
-                        `Exceeded ${TX_STATUS_RETRY_NUMBER} attempts for transaction ${baseEncode(txHash)}.`,
-                        'RetriesExceeded',
-                        new ErrorContext(baseEncode(txHash)));
-                }
-                return result;
+                return await this.connection.provider.sendTransaction(signedTx);
             } catch (error) {
-                if (error.message.match(/Transaction nonce \d+ must be larger than nonce of the used access key \d+/)) {
+                if (error.type === 'InvalidNonce') {
                     console.warn(`Retrying transaction ${receiverId}:${baseEncode(txHash)} with new nonce.`);
                     delete this.accessKeyByPublicKeyCache[publicKey.toString()];
                     return null;
@@ -219,10 +204,20 @@ export class Account {
         return result;
     }
 
-    accessKeyByPublicKeyCache: { [key: string]: AccessKey } = {}
+    /** @hidden */
+    accessKeyByPublicKeyCache: { [key: string]: AccessKeyView } = {}
 
-    private async findAccessKey(receiverId: string, actions: Action[]): Promise<{publicKey: PublicKey; accessKey: AccessKey}> {
-        // TODO: Find matching access key based on transaction
+    /**
+     * Finds the {@link AccessKeyView} associated with the accounts {@link PublicKey} stored in the {@link KeyStore}.
+     * 
+     * @todo Find matching access key based on transaction (i.e. receiverId and actions)
+     * 
+     * @param receiverId currently unused (see todo)
+     * @param actions currently unused (see todo)
+     * @returns `{ publicKey PublicKey; accessKey: AccessKeyView }`
+     */
+    async findAccessKey(receiverId: string, actions: Action[]): Promise<{publicKey: PublicKey; accessKey: AccessKeyView}> {
+        // TODO: Find matching access key based on transaction (i.e. receiverId and actions)
         const publicKey = await this.connection.signer.getPublicKey(this.accountId, this.connection.networkId);
         if (!publicKey) {
             return null;
@@ -234,12 +229,16 @@ export class Account {
         }
 
         try {
-            const accessKey = await this.connection.provider.query(`access_key/${this.accountId}/${publicKey.toString()}`, '');
+            const accessKey = await this.connection.provider.query<AccessKeyView>({
+                request_type: 'view_access_key',
+                account_id: this.accountId,
+                public_key: publicKey.toString(),
+                finality: 'optimistic'
+            });
             this.accessKeyByPublicKeyCache[publicKey.toString()] = accessKey;
             return { publicKey, accessKey };
         } catch (e) {
-            // TODO: Check based on .type when nearcore starts returning query errors in structured format
-            if (e.message.includes('does not exist while viewing')) {
+            if (e.type == 'AccessKeyDoesNotExist') {
                 return null;
             }
 
@@ -248,10 +247,11 @@ export class Account {
     }
 
     /**
+     * Create a new account and deploy a contract to it
+     * 
      * @param contractId NEAR account where the contract is deployed
-     * @param publicKey The public key to add while signing and sending the transaction
+     * @param publicKey The public key to add to the created contract account
      * @param data The compiled contract code
-     * @returns {Promise<Account>}
      */
     async createAndDeployContract(contractId: string, publicKey: string | PublicKey, data: Uint8Array, amount: BN): Promise<Account> {
         const accessKey = fullAccessKey();
@@ -263,7 +263,6 @@ export class Account {
     /**
      * @param receiverId NEAR account receiving Ⓝ
      * @param amount Amount to send in yoctoⓃ
-     * @returns {Promise<FinalExecutionOutcome>}
      */
     async sendMoney(receiverId: string, amount: BN): Promise<FinalExecutionOutcome> {
         return this.signAndSendTransaction(receiverId, [transfer(amount)]);
@@ -272,7 +271,6 @@ export class Account {
     /**
      * @param newAccountId NEAR account name to be created
      * @param publicKey A public key created from the masterAccount
-     * @returns {Promise<FinalExecutionOutcome>}
      */
     async createAccount(newAccountId: string, publicKey: string | PublicKey, amount: BN): Promise<FinalExecutionOutcome> {
         const accessKey = fullAccessKey();
@@ -281,15 +279,13 @@ export class Account {
 
     /**
      * @param beneficiaryId The NEAR account that will receive the remaining Ⓝ balance from the account being deleted
-     * @returns void
      */
-    async deleteAccount(beneficiaryId: string) {
+    async deleteAccount(beneficiaryId: string): Promise<FinalExecutionOutcome> {
         return this.signAndSendTransaction(this.accountId, [deleteAccount(beneficiaryId)]);
     }
 
     /**
      * @param data The compiled contract code
-     * @returns {Promise<FinalExecutionOutcome>}
      */
     async deployContract(data: Uint8Array): Promise<FinalExecutionOutcome> {
         return this.signAndSendTransaction(this.accountId, [deployContract(data)]);
@@ -302,7 +298,6 @@ export class Account {
      *  or `Uint8Array` instance which represents bytes passed as is.
      * @param gas max amount of gas that method call can use
       * @param deposit amount of NEAR (in yoctoNEAR) to send together with the call
-     * @returns {Promise<FinalExecutionOutcome>}
      */
     async functionCall(contractId: string, methodName: string, args: any, gas?: BN, amount?: BN): Promise<FinalExecutionOutcome> {
         args = args || {};
@@ -311,12 +306,12 @@ export class Account {
     }
 
     /**
+     * @see {@link https://docs.near.org/docs/concepts/account#access-keys}
+     * @todo expand this API to support more options.
      * @param publicKey A public key to be associated with the contract
      * @param contractId NEAR account where the contract is deployed
      * @param methodNames The method names on the contract that should be allowed to be called. Pass null for no method names and '' or [] for any method names.
      * @param amount Payment in yoctoⓃ that is sent to the contract during this function call
-     * @returns {Promise<FinalExecutionOutcome>}
-     * TODO: expand this API to support more options.
      */
     async addKey(publicKey: string | PublicKey, contractId?: string, methodNames?: string|string[], amount?: BN): Promise<FinalExecutionOutcome> {
         if (!methodNames) {
@@ -343,14 +338,16 @@ export class Account {
     }
 
     /**
+     * @see {@link https://docs.near.org/docs/validator/staking-overview}
+     * 
      * @param publicKey The public key for the account that's staking
      * @param amount The account to stake in yoctoⓃ
-     * @returns {Promise<FinalExecutionOutcome>}
      */
     async stake(publicKey: string | PublicKey, amount: BN): Promise<FinalExecutionOutcome> {
         return this.signAndSendTransaction(this.accountId, [stake(amount, PublicKey.from(publicKey))]);
     }
 
+    /** @hidden */
     private validateArgs(args: any) {
         const isUint8Array = args.byteLength !== undefined && args.byteLength === args.length;
         if (isUint8Array) {
@@ -363,6 +360,9 @@ export class Account {
     }
 
     /**
+     * Invoke a contract view function using the RPC API.
+     * @see {@link https://docs.near.org/docs/develop/front-end/rpc#call-a-contract-function}
+     * 
      * @param contractId NEAR account where the contract is deployed
      * @param methodName The view-only method (no state mutations) name on the contract as it is written in the contract code
      * @param args Any arguments to the view contract method, wrapped in JSON
@@ -371,33 +371,38 @@ export class Account {
     async viewFunction(
         contractId: string,
         methodName: string,
-        args: any,
+        args: any = {},
         { parse = parseJsonFromRawResponse } = {}
     ): Promise<any> {
-        args = args || {};
         this.validateArgs(args);
-        const result = await this.connection.provider.query(`call/${contractId}/${methodName}`, baseEncode(JSON.stringify(args)));
+        
+        const result = await this.connection.provider.query<CodeResult>({
+            request_type: 'call_function',
+            account_id: contractId,
+            method_name: methodName,
+            args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
+            finality: 'optimistic'
+        });
+
         if (result.logs) {
             this.printLogs(contractId, result.logs);
         }
+
         return result.result && result.result.length > 0 && parse(Buffer.from(result.result));
     }
 
     /**
-     * See https://docs.near.org/docs/api/rpc#view-contract-state
-     *
      * Returns the state (key value pairs) of this account's contract based on the key prefix.
      * Pass an empty string for prefix if you would like to return the entire state.
+     * @see {@link https://docs.near.org/docs/develop/front-end/rpc#view-contract-state}
      *
      * @param prefix allows to filter which keys should be returned. Empty prefix means all keys. String prefix is utf-8 encoded.
      * @param blockQuery specifies which block to query state at. By default returns last "optimistic" block (i.e. not necessarily finalized).
      */
-    async viewState(prefix: string | Uint8Array, blockQuery: { blockId: BlockId } | { finality: Finality } ): Promise<Array<{ key: Buffer, value: Buffer}>> {
-        const { blockId, finality } = blockQuery as any || {};
-        const { values } = await this.connection.provider.query({
+    async viewState(prefix: string | Uint8Array, blockQuery: { blockId: BlockId } | { finality: Finality } = { finality: 'optimistic' } ): Promise<Array<{ key: Buffer; value: Buffer}>> {
+        const { values } = await this.connection.provider.query<ViewStateResult>({
             request_type: 'view_state',
-            block_id: blockId,
-            finality: blockId ? undefined : finality || 'optimistic',
+            ...blockQuery,
             account_id: this.accountId,
             prefix_base64: Buffer.from(prefix).toString('base64')
         });
@@ -405,14 +410,19 @@ export class Account {
         return values.map(({key, value}) => ({
             key: Buffer.from(key, 'base64'),
             value: Buffer.from(value, 'base64')
-        }))
+        }));
     }
 
     /**
-     * @returns array of {access_key: AccessKey, public_key: PublicKey} items.
+     * Get all access keys for the account
+     * @see {@link https://docs.near.org/docs/develop/front-end/rpc#view-access-key-list}
      */
-    async getAccessKeys(): Promise<any> {
-        const response = await this.connection.provider.query(`access_key/${this.accountId}`, '');
+    async getAccessKeys(): Promise<AccessKeyInfoView[]> {
+        const response = await this.connection.provider.query<AccessKeyList>({
+            request_type: 'view_access_key_list',
+            account_id: this.accountId,
+            finality: 'optimistic'
+        });
         // A breaking API change introduced extra information into the
         // response, so it now returns an object with a `keys` field instead
         // of an array: https://github.com/nearprotocol/nearcore/pull/1789
@@ -423,36 +433,34 @@ export class Account {
     }
 
     /**
-     * Returns account details in terms of authorized apps and transactions
-     * @returns {Promise<any>}
+     * Returns a list of authorized apps
+     * @todo update the response value to return all the different keys, not just app keys.
      */
-    async getAccountDetails(): Promise<any> {
+    async getAccountDetails(): Promise<{ authorizedApps: AccountAuthorizedApp[] }> {
         // TODO: update the response value to return all the different keys, not just app keys.
         // Also if we need this function, or getAccessKeys is good enough.
         const accessKeys = await this.getAccessKeys();
-        const result: any = { authorizedApps: [], transactions: [] };
-        accessKeys.map((item) => {
-            if (item.access_key.permission.FunctionCall !== undefined) {
-                const perm = item.access_key.permission.FunctionCall;
-                result.authorizedApps.push({
-                    contractId: perm.receiver_id,
-                    amount: perm.allowance,
+        const authorizedApps = accessKeys
+            .filter(item => item.access_key.permission !== 'FullAccess')
+            .map(item => {
+                const perm = (item.access_key.permission as FunctionCallPermissionView);
+                return {
+                    contractId: perm.FunctionCall.receiver_id,
+                    amount: perm.FunctionCall.allowance,
                     publicKey: item.public_key,
-                });
-            }
-        });
-        return result;
+                };
+            });
+        return { authorizedApps };
     }
 
     /**
      * Returns calculated account balance
-     * @returns {Promise<AccountBalance>}
      */
     async getAccountBalance(): Promise<AccountBalance> {
-        const genesisConfig = await this.connection.provider.experimental_genesisConfig();
+        const protocolConfig = await this.connection.provider.experimental_protocolConfig({ finality: 'final' });
         const state = await this.state();
 
-        const costPerByte = new BN(genesisConfig.runtime_config.storage_amount_per_byte);
+        const costPerByte = new BN(protocolConfig.runtime_config.storage_amount_per_byte);
         const stateStaked = new BN(state.storage_usage).mul(costPerByte);
         const staked = new BN(state.locked);
         const totalBalance = new BN(state.amount).add(staked);

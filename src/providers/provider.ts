@@ -1,5 +1,10 @@
-import { Network } from '../utils/network';
+/**
+ * NEAR RPC API request types and responses
+ * @module
+ */
+
 import { SignedTransaction } from '../transaction';
+import { PublicKey } from '../utils/key_pair';
 
 export interface SyncInfo {
     latest_block_hash: string;
@@ -27,6 +32,8 @@ type BlockHeight = number;
 export type BlockId = BlockHash | BlockHeight;
 
 export type Finality = 'optimistic' | 'near-final' | 'final'
+
+export type BlockReference = { blockId: BlockId } | { finality: Finality } | { sync_checkpoint: 'genesis' | 'earliest_available' }
 
 export enum ExecutionStatusBasic {
     Unknown = 'Unknown',
@@ -87,15 +94,35 @@ export interface TotalWeight {
 }
 
 export interface BlockHeader {
-    approval_mask: string;
-    approval_sigs: string;
-    hash: string;
     height: number;
+    epoch_id: string;
+    next_epoch_id: string;
+    hash: string;
     prev_hash: string;
     prev_state_root: string;
+    chunk_receipts_root: string;
+    chunk_headers_root: string;
+    chunk_tx_root: string;
+    outcome_root: string;
+    chunks_included: number;
+    challenges_root: string;
     timestamp: number;
-    total_weight: TotalWeight;
-    tx_root: string;
+    timestamp_nanosec: string;
+    random_value: string;
+    validator_proposals: any[];
+    chunk_mask: boolean[];
+    gas_price: string;
+    rent_paid: string;
+    validator_reward: string;
+    total_supply: string;
+    challenges_result: any[];
+    last_final_block: string;
+    last_ds_final_block: string;
+    next_bp_hash: string;
+    block_merkle_root: string;
+    approvals: string[];
+    signature: string;
+    latest_protocol_version: number;
 }
 
 export type ChunkHash = string;
@@ -104,30 +131,51 @@ export type BlockShardId = [BlockId, ShardId];
 export type ChunkId = ChunkHash | BlockShardId;
 
 export interface ChunkHeader {
-  balance_burnt: string;
-  chunk_hash: ChunkHash;
-  encoded_length: number;
-  encoded_merkle_root: string;
-  gas_limit: number;
-  gas_used: number;
-  height_created: number;
-  height_included: number;
-  outgoing_receipts_root: string;
-  prev_block_hash: string;
-  prev_state_num_parts: number;
-  prev_state_root_hash: string;
-  rent_paid: string;
-  shard_id: number;
-  signature: string;
-  tx_root: string;
-  validator_proposals: any[];
-  validator_reward: string;
+    balance_burnt: string;
+    chunk_hash: ChunkHash;
+    encoded_length: number;
+    encoded_merkle_root: string;
+    gas_limit: number;
+    gas_used: number;
+    height_created: number;
+    height_included: number;
+    outgoing_receipts_root: string;
+    prev_block_hash: string;
+    prev_state_num_parts: number;
+    prev_state_root_hash: string;
+    rent_paid: string;
+    shard_id: number;
+    signature: string;
+    tx_root: string;
+    validator_proposals: any[];
+    validator_reward: string;
 }
 
 export interface ChunkResult {
-  header: ChunkHeader;
-  receipts: any[];
-  transactions: Transaction[];
+    header: ChunkHeader;
+    receipts: any[];
+    transactions: Transaction[];
+}
+
+export interface Chunk {
+    chunk_hash: string;
+    prev_block_hash: string;
+    outcome_root: string;
+    prev_state_root: string;
+    encoded_merkle_root: string;
+    encoded_length: number;
+    height_created: number;
+    height_included: number;
+    shard_id: number;
+    gas_used: number;
+    gas_limit: number;
+    rent_paid: string;
+    validator_reward: string;
+    balance_burnt: string;
+    outgoing_receipts_root: string;
+    tx_root: string;
+    validator_proposals: any[];
+    signature: string;
 }
 
 export interface Transaction {
@@ -138,8 +186,24 @@ export interface Transaction {
 }
 
 export interface BlockResult {
+    author: string;
     header: BlockHeader;
-    transactions: Transaction[];
+    chunks: Chunk[];
+}
+
+export interface BlockChange {
+    type: string;
+    account_id: string;
+}
+
+export interface BlockChangeResult {
+    block_hash: string;
+    changes: BlockChange[];
+}
+
+export interface ChangeResult {
+    block_hash: string;
+    changes: any[];
 }
 
 export interface CurrentEpochValidatorInfo {
@@ -165,11 +229,11 @@ export interface ValidatorStakeView {
     stake: string;
 }
 
-export interface GenesisConfig {
-    runtime_config: RuntimeConfig;
+export interface NearProtocolConfig {
+    runtime_config: NearProtocolRuntimeConfig;
 }
 
-export interface RuntimeConfig {
+export interface NearProtocolRuntimeConfig {
     storage_amount_per_byte: string;
 }
 
@@ -235,21 +299,141 @@ export interface LightClientProofRequest {
     receiver_id?: string;
 }
 
-export abstract class Provider {
-    abstract async getNetwork(): Promise<Network>;
-    abstract async status(): Promise<NodeStatusResult>;
-
-    abstract async sendTransaction(signedTransaction: SignedTransaction): Promise<FinalExecutionOutcome>;
-    abstract async txStatus(txHash: Uint8Array, accountId: string): Promise<FinalExecutionOutcome>;
-    abstract async query(params: object): Promise<any>;
-    abstract async query(path: string, data: string): Promise<any>;
-    abstract async block(blockId: BlockId): Promise<BlockResult>;
-    abstract async chunk(chunkId: ChunkId): Promise<ChunkResult>;
-    abstract async validators(blockId: BlockId): Promise<EpochValidatorInfo>;
-    abstract async experimental_genesisConfig(): Promise<GenesisConfig>;
-    abstract async lightClientProof(request: LightClientProofRequest): Promise<LightClientProof>;
+export interface GasPrice {
+    gas_price: string;
 }
 
+export interface AccessKeyWithPublicKey {
+    account_id: string;
+    public_key: string;
+}
+
+export interface QueryResponseKind {
+    block_height: BlockHeight;
+    block_hash: BlockHash;
+}
+
+export interface AccountView extends QueryResponseKind {
+    amount: string;
+    locked: string;
+    code_hash: string;
+    storage_usage: number;
+    storage_paid_at: BlockHeight;
+}
+
+interface StateItem {
+    key: string;
+    value: string;
+    proof: string[];
+}
+
+export interface ViewStateResult extends QueryResponseKind {
+    values: StateItem[];
+    proof: string[];
+}
+
+export interface CodeResult extends QueryResponseKind {
+    result: number[];
+    logs: string[];
+}
+
+export interface ContractCodeView extends QueryResponseKind {
+    code_base64: string;
+    hash: string;
+}
+
+export interface FunctionCallPermissionView {
+    FunctionCall: {
+        allowance: string;
+        receiver_id: string;
+        method_names: string[];
+    };
+}
+export interface AccessKeyView extends QueryResponseKind {
+    nonce: number;
+    permission: 'FullAccess' | FunctionCallPermissionView;
+}
+
+export interface AccessKeyInfoView {
+    public_key: PublicKey;
+    access_key: AccessKeyView;
+}
+
+export interface AccessKeyList extends QueryResponseKind {
+    keys: AccessKeyInfoView[];
+}
+
+export interface ViewAccountRequest {
+    request_type: 'view_account';
+    account_id: string;
+}
+
+export interface ViewCodeRequest {
+    request_type: 'view_code';
+    account_id: string;
+}
+
+export interface ViewStateRequest {
+    request_type: 'view_state';
+    account_id: string;
+    prefix_base64: string;
+}
+
+export interface ViewAccessKeyRequest {
+    request_type: 'view_access_key';
+    account_id: string;
+    public_key: string;
+}
+
+export interface ViewAccessKeyListRequest {
+    request_type: 'view_access_key_list';
+    account_id: string;
+}
+
+export interface CallFunctionRequest {
+    request_type: 'call_function';
+    account_id: string;
+    method_name: string;
+    args_base64: string;
+}
+
+export type RpcQueryRequest = (ViewAccountRequest |
+    ViewCodeRequest |
+    ViewStateRequest |
+    ViewAccountRequest |
+    ViewAccessKeyRequest |
+    ViewAccessKeyListRequest |
+    CallFunctionRequest) & BlockReference
+
+
+/** @hidden */
+export abstract class Provider {
+    abstract status(): Promise<NodeStatusResult>;
+
+    abstract sendTransaction(signedTransaction: SignedTransaction): Promise<FinalExecutionOutcome>;
+    abstract sendTransactionAsync(signedTransaction: SignedTransaction): Promise<FinalExecutionOutcome>;
+    abstract txStatus(txHash: Uint8Array | string, accountId: string): Promise<FinalExecutionOutcome>;
+    abstract txStatusReceipts(txHash: Uint8Array, accountId: string): Promise<FinalExecutionOutcome>;
+    abstract query<T extends QueryResponseKind>(params: RpcQueryRequest): Promise<T>;
+    abstract query<T extends QueryResponseKind>(path: string, data: string): Promise<T>;
+    // TODO: BlockQuery type?
+    abstract block(blockQuery: BlockId | BlockReference): Promise<BlockResult>;
+    abstract blockChanges(blockQuery: BlockId | BlockReference): Promise<BlockChangeResult>;
+    abstract chunk(chunkId: ChunkId): Promise<ChunkResult>;
+    // TODO: Use BlockQuery?
+    abstract validators(blockId: BlockId): Promise<EpochValidatorInfo>;
+    abstract experimental_genesisConfig(): Promise<NearProtocolConfig>;
+    abstract experimental_protocolConfig(blockReference: BlockReference): Promise<NearProtocolConfig>;
+    abstract lightClientProof(request: LightClientProofRequest): Promise<LightClientProof>;
+    abstract gasPrice(blockId: BlockId): Promise<GasPrice>;
+    abstract accessKeyChanges(accountIdArray: string[], BlockQuery: BlockId | BlockReference): Promise<ChangeResult>;
+    abstract singleAccessKeyChanges(accessKeyArray: AccessKeyWithPublicKey[], BlockQuery: BlockId | BlockReference): Promise<ChangeResult>;
+    abstract accountChanges(accountIdArray: string[], BlockQuery: BlockId | BlockReference): Promise<ChangeResult>;
+    abstract contractStateChanges(accountIdArray: string[], BlockQuery: BlockId | BlockReference, keyPrefix: string): Promise<ChangeResult>;
+    abstract contractCodeChanges(accountIdArray: string[], BlockQuery: BlockId | BlockReference): Promise<ChangeResult>;
+}
+
+/** @hidden */
 export function getTransactionLastResult(txResult: FinalExecutionOutcome): any {
     if (typeof txResult.status === 'object' && typeof txResult.status.SuccessValue === 'string') {
         const value = Buffer.from(txResult.status.SuccessValue, 'base64').toString();
